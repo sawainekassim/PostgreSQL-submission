@@ -1,0 +1,108 @@
+POSTGRESQL PRACTICAL ASSIGNMENT — COMMAND APPENDIX
+
+IMPORTANT
+This is a reference appendix documenting commands used during the practical. It is NOT a single script to run from top to bottom. Some commands create databases or delete test data. Do not re-run commands blindly after the practical is completed. Commands below are grouped by where they run.
+
+A. WINDOWS POWERSHELL — LOGICAL BACKUP / RESTORE CHECKS
+
+# Create a custom-format dump of bootcamp (already completed)
+.\pg_dump.exe -U postgres -h localhost -p 5432 -Fc -f "C:\Users\Kassim\backups\bootcamp.dump" bootcamp
+
+# Inspect the dump
+.\pg_restore.exe --list "C:\Users\Kassim\backups\bootcamp.dump" | Select-Object -First 10
+
+# Confirm restored student count in bootcamp_check
+.\psql.exe -U postgres -h localhost -p 5432 -d bootcamp_check -c "SELECT count(*) AS student_count FROM students;"
+
+B. WINDOWS POWERSHELL — PHYSICAL BACKUP
+
+# Create physical backup (already completed; avoid overwriting an existing backup directory)
+.\pg_basebackup.exe -U postgres -h localhost -p 5432 -D "C:\Users\Kassim\backups\base" -F plain -X stream -P
+
+# Verify physical backup
+.\pg_verifybackup.exe "C:\Users\Kassim\backups\base"
+
+C. SQL CHECKS — WAL ARCHIVING (RUN THROUGH POWERSHELL WITH psql)
+
+# Inspect primary configuration
+.\psql.exe -U postgres -h localhost -p 5432 -d postgres -c "SHOW wal_level; SHOW archive_mode; SHOW archive_command; SHOW archive_timeout; SHOW max_wal_senders;"
+
+# Encourage the current WAL segment to switch so it can be archived
+.\psql.exe -U postgres -h localhost -p 5432 -d postgres -c "SELECT pg_switch_wal();"
+
+# Check archive status
+.\psql.exe -U postgres -h localhost -p 5432 -d postgres -c "SELECT archived_count, last_archived_wal, last_archived_time, failed_count, last_failed_wal FROM pg_stat_archiver;"
+
+# List the archived WAL files
+Get-ChildItem "C:\Users\Kassim\backups\wal" | Select-Object Name, Length, LastWriteTime
+
+D. POINT-IN-TIME RECOVERY (PITR) — TEST DATABASE
+
+# Create disposable test database (already created)
+.\psql.exe -U postgres -h localhost -p 5432 -d postgres -c "CREATE DATABASE pitr_demo;"
+
+# Create and populate disposable test table (already completed)
+.\psql.exe -U postgres -h localhost -p 5432 -d pitr_demo -c "CREATE TABLE recovery_test (id integer PRIMARY KEY, note text); INSERT INTO recovery_test VALUES (1, 'First test record'), (2, 'Second test record');"
+
+# Record recovery target before deletion (actual recorded target: 2026-10-20 22:36:55.91438+03)
+.\psql.exe -U postgres -h localhost -p 5432 -d pitr_demo -c "SELECT clock_timestamp() AS recovery_target, count(*) AS rows_before_deletion FROM recovery_test;"
+
+# SIMULATED DESTRUCTIVE STEP — already completed; do not repeat unless resetting the exercise
+.\psql.exe -U postgres -h localhost -p 5432 -d pitr_demo -c "DELETE FROM recovery_test;"
+
+# Verify the deletion on primary (historical result: 0 rows)
+.\psql.exe -U postgres -h localhost -p 5432 -d pitr_demo -c "SELECT count(*) AS rows_after_deletion FROM recovery_test;"
+
+# Start the already-configured PITR recovery copy on port 5433
+.\pg_ctl.exe -D "C:\Users\Kassim\backups\pitr" -l "C:\Users\Kassim\backups\pitr\recovery.log" -w start
+
+# Verify PITR status and restored row count on port 5433
+.\psql.exe -U postgres -h localhost -p 5433 -d pitr_demo -c "SELECT pg_is_in_recovery() AS in_recovery, count(*) AS restored_rows FROM recovery_test;"
+
+# Display recovered rows
+.\psql.exe -U postgres -h localhost -p 5433 -d pitr_demo -c "SELECT * FROM recovery_test ORDER BY id;"
+
+E. STREAMING REPLICATION
+
+# Check primary-side prerequisites
+.\psql.exe -U postgres -h localhost -p 5432 -d postgres -c "SHOW wal_level; SHOW max_wal_senders; SHOW listen_addresses; SHOW hba_file;"
+
+# Create standby from primary (already completed; do not repeat over the existing standby directory)
+.\pg_basebackup.exe -U postgres -h localhost -p 5432 -D "C:\Users\Kassim\backups\standby" -R -X stream -P -W
+
+# Start standby on port 5434
+.\pg_ctl.exe -D "C:\Users\Kassim\backups\standby" -l "C:\Users\Kassim\backups\standby\standby.log" -w start
+
+# Verify standby WAL receiver (PostgreSQL 17 column names)
+.\psql.exe -U postgres -h localhost -p 5434 -d postgres -c "SELECT status, sender_host, sender_port, written_lsn, flushed_lsn, received_tli, latest_end_lsn, latest_end_time FROM pg_stat_wal_receiver;"
+
+# Verify primary sees the standby
+.\psql.exe -U postgres -h localhost -p 5432 -d postgres -c "SELECT application_name, client_addr, state, sync_state, sent_lsn, write_lsn, flush_lsn, replay_lsn FROM pg_stat_replication;"
+
+# Replication test insert (already completed on primary)
+.\psql.exe -U postgres -h localhost -p 5432 -d pitr_demo -c "INSERT INTO recovery_test VALUES (3, 'Replication test record');"
+
+# Verify record appears on standby (already completed)
+.\psql.exe -U postgres -h localhost -p 5434 -d pitr_demo -c "SELECT * FROM recovery_test ORDER BY id;"
+
+F. USEFUL FILE AND STATUS CHECKS
+
+# Verify a signal file exists
+Test-Path "C:\Users\Kassim\backups\standby\standby.signal"
+
+# Check standby server status
+.\pg_ctl.exe -D "C:\Users\Kassim\backups\standby" status
+
+# Display recent detailed standby log
+$latestLog = Get-ChildItem "C:\Users\Kassim\backups\standby\log" -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Get-Content $latestLog.FullName -Tail 80
+
+RECORDED KEY RESULTS
+- Physical backup verification: "backup successfully verified"
+- bootcamp_check student count: 5
+- WAL archive status at a recorded check: archived_count 9, latest archived WAL 000000010000000000000008, failed_count 0
+- PITR target: 2026-10-20 22:36:55.91438+03
+- PITR copy on port 5433: in_recovery = true; two test rows restored
+- Standby receiver on port 5434: status = streaming; sender localhost:5432
+- Primary pg_stat_replication: state = streaming; sync_state = async
+- Replication test row: id 3, "Replication test record" appeared on standby
